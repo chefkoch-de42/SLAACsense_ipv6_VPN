@@ -10,10 +10,13 @@ By leveraging the (dnsmasq) DHCPv4 lease information and mapping it to the MAC a
 
 Define the environment variables in the docker-compose file, then run: `docker compose up -d`
 
+You can optionally set the `DOCKER_IMAGE` environment variable to use a specific Docker image version or your own custom build. If not specified, it defaults to `ghcr.io/notherealmarco/slaacsense:latest`.
+
 ### Environment variables:
 
 | Variable Name                          | Description                                                                                                  | Example Value                                                          |
 |----------------------------------------|--------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------|
+| `DOCKER_IMAGE`                         | Docker image to use (optional, overrides default)                                                            | `ghcr.io/notherealmarco/slaacsense:latest` (defaults to latest)        |
 | `OPNSENSE_URL`                         | The base URL of your OPNsense instance                                                                       | http://192.168.1.1 (required)                                          |
 | `OPNSENSE_API_KEY`                     | OPNsense API key                                                                                             | `your_opnsense_api_key` (required)                                     |
 | `OPNSENSE_API_SECRET`                  | OPNsense API secret                                                                                          | `a_very_secret_token` (required)                                       |
