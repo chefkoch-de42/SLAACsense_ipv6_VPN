@@ -5,7 +5,6 @@ services:
     build: .
     container_name: slaacsense
     restart: unless-stopped
-    pull_policy: always
     environment:
       - OPNSENSE_URL=${OPNSENSE_URL}
       - OPNSENSE_API_KEY=${OPNSENSE_API_KEY}
@@ -16,3 +15,8 @@ services:
       - DO_V4=${DO_V4}
       - VERIFY_HTTPS=${VERIFY_HTTPS}
       - CLOCK=${CLOCK}
+      # optional: reverse zone auto-creation settings (Technitium)
+      - TECHNITIUM_PTR_CATALOG=${TECHNITIUM_PTR_CATALOG}
+      - TECHNITIUM_USE_SOA_SERIAL_DATE_SCHEME=${TECHNITIUM_USE_SOA_SERIAL_DATE_SCHEME}
+      - TECHNITIUM_IPV6_PTR_PREFIXLEN=${TECHNITIUM_IPV6_PTR_PREFIXLEN}
+      - TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG=${TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG}
