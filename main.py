@@ -31,6 +31,11 @@ TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG = ((os.getenv("TECHNITIUM_ZONE_CREATE
 # If a PTR-only record exists but points somewhere else, replace it (delete+add).
 TECHNITIUM_PTR_ONLY_OVERWRITE = ((os.getenv("TECHNITIUM_PTR_ONLY_OVERWRITE") or "false").lower() == "true")
 
+# WireGuard support
+# Format: "wg_instance_name=dns.zone,another_instance=other.zone"
+WG_INSTANCES_ZONES = os.getenv("WG_INSTANCES_ZONES") or None
+ENABLE_WIREGUARD = ((os.getenv("ENABLE_WIREGUARD") or "false").lower() == "true")
+
 def get_opnsense_data(path):
     r = requests.get(url=OPNSENSE_URL + path, verify=VERIFY_HTTPS, auth=(OPNSENSE_API_KEY, OPNSENSE_API_SECRET))
     if r.status_code != 200:
@@ -105,6 +110,14 @@ def get_dhcp4_leases_v2():
         data["total"] = len(v4_rows)
 
     return data
+
+def get_wireguard_servers():
+    """Retrieve WireGuard server configurations from OPNsense."""
+    return get_opnsense_data("/api/wireguard/server/search_server")
+
+def get_wireguard_clients():
+    """Retrieve WireGuard client configurations from OPNsense."""
+    return get_opnsense_data("/api/wireguard/client/search_client")
 
 def build_matches(ndp, leases):
     matches = set()
@@ -453,6 +466,165 @@ def add_ptr_only(zone: str, domain: str, ip: str):
     logging.info(f"Added PTR-only record for {ip} -> {desired_ptr_name}")
 
 
+def parse_wg_instances_zones():
+    """Parse WG_INSTANCES_ZONES env var into a dict mapping instance UUID to DNS zone.
+
+    Format: "instance_name=dns.zone,another_instance=other.zone"
+    Returns: dict with instance_name -> zone
+    """
+    if not WG_INSTANCES_ZONES:
+        return {}
+
+    mapping = {}
+    for part in WG_INSTANCES_ZONES.split(","):
+        part = part.strip()
+        if not part:
+            continue
+
+        parts = part.split("=", 1)
+        if len(parts) != 2:
+            logging.warning(f"Invalid WG_INSTANCES_ZONES entry: {part}")
+            continue
+
+        instance_name, zone = parts[0].strip(), parts[1].strip()
+        mapping[instance_name] = zone
+
+    return mapping
+
+def process_wireguard_clients():
+    """Process WireGuard clients and create DNS records for them."""
+    if not ENABLE_WIREGUARD or not WG_INSTANCES_ZONES:
+        return set()
+
+    wg_servers = get_wireguard_servers()
+    if not wg_servers or not isinstance(wg_servers.get("rows"), list):
+        logging.warning("Failed to retrieve WireGuard servers or invalid response")
+        return set()
+
+    wg_clients = get_wireguard_clients()
+    if not wg_clients or not isinstance(wg_clients.get("rows"), list):
+        logging.warning("Failed to retrieve WireGuard clients or invalid response")
+        return set()
+
+    instance_zones = parse_wg_instances_zones()
+
+    # Build mapping: instance_name -> (uuid, ipv4_network, ipv6_network)
+    server_info = {}
+    for server in wg_servers["rows"]:
+        name = server.get("name")
+        uuid = server.get("uuid")
+        tunneladdress = server.get("tunneladdress", "")
+
+        if not name or not uuid or name not in instance_zones:
+            continue
+
+        # Parse tunneladdress: "10.99.99.254/24,fd10:0099:0099::254/64"
+        ipv4_net = None
+        ipv6_net = None
+
+        for addr in tunneladdress.split(","):
+            addr = addr.strip()
+            if not addr:
+                continue
+
+            try:
+                net = ipaddress.ip_network(addr, strict=False)
+                if net.version == 4:
+                    ipv4_net = net
+                elif net.version == 6:
+                    ipv6_net = net
+            except ValueError:
+                continue
+
+        server_info[uuid] = {
+            "name": name,
+            "zone": instance_zones[name],
+            "ipv4_net": ipv4_net,
+            "ipv6_net": ipv6_net
+        }
+
+    # Process clients
+    wg_matches = set()
+    for client in wg_clients["rows"]:
+        if client.get("enabled") != "1":
+            continue
+
+        name = client.get("name")
+        servers = client.get("servers")  # UUID of the server instance
+        tunneladdress = client.get("tunneladdress", "")
+
+        if not name or not servers or servers not in server_info:
+            continue
+
+        server = server_info[servers]
+        zone = server["zone"]
+
+        # Parse client tunneladdress and filter for /32 and /128 that match server networks
+        ipv4_addrs = []
+        ipv6_addrs = []
+
+        for addr in tunneladdress.split(","):
+            addr = addr.strip()
+            if not addr:
+                continue
+
+            try:
+                # Check if it's a host address (/32 or /128)
+                if addr.endswith("/32"):
+                    ip = ipaddress.ip_address(addr.replace("/32", ""))
+                    if ip.version == 4 and server["ipv4_net"] and ip in server["ipv4_net"]:
+                        ipv4_addrs.append(ip.compressed)
+                elif addr.endswith("/128"):
+                    ip = ipaddress.ip_address(addr.replace("/128", ""))
+                    if ip.version == 6 and server["ipv6_net"] and ip in server["ipv6_net"]:
+                        ipv6_addrs.append(ip.compressed)
+            except ValueError:
+                continue
+
+        # Create match entry for each IPv4 address (similar to DHCP matches)
+        for ipv4 in ipv4_addrs:
+            wg_matches.add((ipv4, tuple(ipv6_addrs), name, zone))
+
+    return wg_matches
+
+def sync_wg_records(match):
+    """Sync DNS records for a WireGuard client.
+
+    match format: (ipv4, ipv6s_tuple, hostname, zone)
+    """
+    ip4, ip6s, hostname, zone = match
+
+    if not hostname:
+        logging.warning(f"No hostname for WireGuard client with IP {ip4}")
+        return
+
+    ip6s_all = [ipaddress.ip_address(x) for x in ip6s]
+
+    # For WireGuard, we typically want to publish both ULA and GUA
+    # (different from SLAAC where we only publish ULA as AAAA)
+    ip6s_filtered = [ip.compressed for ip in ip6s_all if not ip.is_link_local]
+
+    existing_records = get_existing_records(hostname, zone)
+    existing_v4 = {ipaddress.ip_address(r["rData"]["ipAddress"]).compressed for r in existing_records if r["type"] == "A"}
+    existing_v6 = {ipaddress.ip_address(r["rData"]["ipAddress"]).compressed for r in existing_records if r["type"] == "AAAA"}
+
+    current_v4 = {ipaddress.ip_address(ip4).compressed}
+    current_v6 = set(ip6s_filtered)
+
+    # Delete outdated records
+    for ip in existing_v4 - current_v4:
+        delete_record(zone, hostname, "A", ip)
+
+    for ip in existing_v6 - current_v6:
+        delete_record(zone, hostname, "AAAA", ip)
+
+    # Add missing records
+    for ip in current_v4 - existing_v4:
+        add_record(zone, hostname, "A", ip)
+
+    for ip in current_v6 - existing_v6:
+        add_record(zone, hostname, "AAAA", ip)
+
 def sync_records(zones, match):
     zone = find_zone(zones, ipaddress.ip_address(match[0]))
     if zone is None:
@@ -509,6 +681,7 @@ def run():
         urllib3.disable_warnings()
 
     previous_matches = set()
+    previous_wg_matches = set()
     zones = []
     for z in DNS_ZONE_SUBNETS.split(","):
         zone = z.split("=")
@@ -534,12 +707,23 @@ def run():
         for match in new_matches:
             sync_records(zones, match)
 
+        # Process WireGuard clients if enabled
+        if ENABLE_WIREGUARD:
+            wg_matches = process_wireguard_clients()
+            new_wg_matches = wg_matches - previous_wg_matches
+            for match in new_wg_matches:
+                sync_wg_records(match)
+            previous_wg_matches = wg_matches
+
         # Every REFRESH_CYCLE iterations, refresh all records to prevent expiration
         refresh_counter += 1
         if refresh_counter >= REFRESH_CYCLE:
             logging.info(f"Performing periodic refresh of all DNS records")
             for match in matches:
                 sync_records(zones, match)
+            if ENABLE_WIREGUARD:
+                for match in previous_wg_matches:
+                    sync_wg_records(match)
             refresh_counter = 0
 
         previous_matches = matches
@@ -566,4 +750,7 @@ if __name__ == "__main__":
     logging.info("OPNSENSE_URL: {}".format(OPNSENSE_URL))
     logging.info("TECHNITIUM_URL: {}".format(TECHNITIUM_URL))
     logging.info("VERIFY_HTTPS: {}".format(VERIFY_HTTPS))
+    logging.info("ENABLE_WIREGUARD: {}".format(ENABLE_WIREGUARD))
+    if ENABLE_WIREGUARD:
+        logging.info("WG_INSTANCES_ZONES: {}".format(WG_INSTANCES_ZONES))
     run()

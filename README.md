@@ -32,6 +32,8 @@ You can optionally set the `DOCKER_IMAGE` environment variable to use a specific
 | `TECHNITIUM_USE_SOA_SERIAL_DATE_SCHEME`| (Optional) Enable SOA serial date scheme when auto-creating reverse zones                                     | `true` (defaults to true)                                              |
 | `TECHNITIUM_IPV6_PTR_PREFIXLEN`        | (Optional) IPv6 reverse zone prefix length to create (must be divisible by 4, e.g. 48/56/64). Default is /64 | `64` (defaults to 64)                                                  |
 | `TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG` | (Optional) Retry creating reverse zones without catalog if catalog permissions are missing               | `true` (defaults to true)                                              |
+| `ENABLE_WIREGUARD`                     | Enable WireGuard client DNS record synchronization                                                        | `false` (defaults to false)                                            |
+| `WG_INSTANCES_ZONES`                   | Map WireGuard instance names to DNS zones (comma-separated)                                               | `wg1=vpn-wg1.example1.com,another=vpn2.example.com`                    |
 
 ### Note
 You have to create the corresponding forward DNS zones in the Technitium dashboard (primary or conditional forwarder zones).
@@ -41,6 +43,20 @@ Reverse zones are required for PTR creation. If a reverse zone is missing, SLAAC
 - `catalog=cluster-catalog.dns.local` (configurable via `TECHNITIUM_PTR_CATALOG`)
 
 If the Technitium token does not have permissions to use the catalog zone, SLAACsense will automatically retry creating the reverse zone without a catalog (configurable via `TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG`).
+
+### WireGuard Support
+SLAACsense can also synchronize DNS records for WireGuard VPN clients configured in OPNsense. When enabled, it will:
+- Query WireGuard server and client configurations from OPNsense
+- Create A and AAAA records for clients with `/32` (IPv4) or `/128` (IPv6) tunnel addresses
+- Only process clients whose tunnel addresses fall within the server's network ranges
+- Map clients to DNS zones based on their WireGuard instance
+
+To enable WireGuard support:
+1. Set `ENABLE_WIREGUARD=true`
+2. Configure `WG_INSTANCES_ZONES` with instance-to-zone mappings (e.g., `wg1=vpn-wg1.example1.com`)
+3. Ensure the corresponding DNS zones exist in Technitium
+
+Example: A WireGuard client named `client-laptop` with tunnel address `10.99.99.201/32` on instance `wg1` will create DNS record `client-laptop.vpn-wg1.example1.com`.
 
 ### Contributing:
 I welcome contributions! Feel free to submit issues, feature requests, or pull requests.
