@@ -8,28 +8,28 @@ from collections import defaultdict
 from functools import lru_cache
 
 # Environment variables
-OPNSENSE_URL = os.getenv("OPNSENSE_URL", None)
-OPNSENSE_API_KEY = os.getenv("OPNSENSE_API_KEY", None)
-OPNSENSE_API_SECRET = os.getenv("OPNSENSE_API_SECRET", None)
-TECHNITIUM_URL = os.getenv("TECHNITIUM_URL", None)
-TECHNITIUM_TOKEN = os.getenv("TECHNITIUM_TOKEN", None)
-DNS_ZONE_SUBNETS = os.getenv("DNS_ZONE_SUBNETS", None)
-DO_V4 = (os.getenv("DO_V4", "false").lower() == "true")
-IGNORE_LINK_LOCAL = (os.getenv("IGNORE_LINK_LOCAL", "true").lower() == "true")
-VERIFY_HTTPS = (os.getenv("VERIFY_HTTPS", "true").lower() == "true")
-CLOCK = int(os.getenv("CLOCK", "30"))
+OPNSENSE_URL = os.getenv("OPNSENSE_URL") or None
+OPNSENSE_API_KEY = os.getenv("OPNSENSE_API_KEY") or None
+OPNSENSE_API_SECRET = os.getenv("OPNSENSE_API_SECRET") or None
+TECHNITIUM_URL = os.getenv("TECHNITIUM_URL") or None
+TECHNITIUM_TOKEN = os.getenv("TECHNITIUM_TOKEN") or None
+DNS_ZONE_SUBNETS = os.getenv("DNS_ZONE_SUBNETS") or None
+DO_V4 = ((os.getenv("DO_V4") or "false").lower() == "true")
+IGNORE_LINK_LOCAL = ((os.getenv("IGNORE_LINK_LOCAL") or "true").lower() == "true")
+VERIFY_HTTPS = ((os.getenv("VERIFY_HTTPS") or "true").lower() == "true")
+CLOCK = int(os.getenv("CLOCK") or "30")
 # How often to refresh all records (in cycles)
-REFRESH_CYCLE = int(os.getenv("REFRESH_CYCLE", "1440"))
+REFRESH_CYCLE = int(os.getenv("REFRESH_CYCLE") or "1440")
 
 # Technitium settings for auto-created reverse zones
-TECHNITIUM_PTR_CATALOG = os.getenv("TECHNITIUM_PTR_CATALOG", "cluster-catalog.dns.local")
-TECHNITIUM_USE_SOA_SERIAL_DATE_SCHEME = (os.getenv("TECHNITIUM_USE_SOA_SERIAL_DATE_SCHEME", "true").lower() == "true")
+TECHNITIUM_PTR_CATALOG = os.getenv("TECHNITIUM_PTR_CATALOG") or "cluster-catalog.dns.local"
+TECHNITIUM_USE_SOA_SERIAL_DATE_SCHEME = ((os.getenv("TECHNITIUM_USE_SOA_SERIAL_DATE_SCHEME") or "true").lower() == "true")
 # IPv6 reverse zone prefix length to create (must be nibble-aligned). Default /64.
-TECHNITIUM_IPV6_PTR_PREFIXLEN = int(os.getenv("TECHNITIUM_IPV6_PTR_PREFIXLEN", "64"))
+TECHNITIUM_IPV6_PTR_PREFIXLEN = int(os.getenv("TECHNITIUM_IPV6_PTR_PREFIXLEN") or "64")
 # If catalog assignment fails (missing permissions), retry creating zone without catalog.
-TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG = (os.getenv("TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG", "true").lower() == "true")
+TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG = ((os.getenv("TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG") or "true").lower() == "true")
 # If a PTR-only record exists but points somewhere else, replace it (delete+add).
-TECHNITIUM_PTR_ONLY_OVERWRITE = (os.getenv("TECHNITIUM_PTR_ONLY_OVERWRITE", "false").lower() == "true")
+TECHNITIUM_PTR_ONLY_OVERWRITE = ((os.getenv("TECHNITIUM_PTR_ONLY_OVERWRITE") or "false").lower() == "true")
 
 def get_opnsense_data(path):
     r = requests.get(url=OPNSENSE_URL + path, verify=VERIFY_HTTPS, auth=(OPNSENSE_API_KEY, OPNSENSE_API_SECRET))
