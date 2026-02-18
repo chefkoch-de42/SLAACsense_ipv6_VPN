@@ -33,8 +33,8 @@ TECHNITIUM_PTR_ONLY_OVERWRITE = ((os.getenv("TECHNITIUM_PTR_ONLY_OVERWRITE") or 
 
 # WireGuard support
 # Format: "wg_instance_name=dns.zone,another_instance=other.zone"
-WG_INSTANCES_ZONES = os.getenv("WG_INSTANCES_ZONES") or None
-ENABLE_WIREGUARD = ((os.getenv("ENABLE_WIREGUARD") or "false").lower() == "true")
+WG_INSTANCES_DNSZONES = os.getenv("WG_INSTANCES_DNSZONES") or None
+ENABLE_WIREGUARD_DNS = ((os.getenv("ENABLE_WIREGUARD_DNS") or "false").lower() == "true")
 
 def get_opnsense_data(path):
     r = requests.get(url=OPNSENSE_URL + path, verify=VERIFY_HTTPS, auth=(OPNSENSE_API_KEY, OPNSENSE_API_SECRET))
@@ -467,23 +467,23 @@ def add_ptr_only(zone: str, domain: str, ip: str):
 
 
 def parse_wg_instances_zones():
-    """Parse WG_INSTANCES_ZONES env var into a dict mapping instance UUID to DNS zone.
+    """Parse WG_INSTANCES_DNSZONES env var into a dict mapping instance UUID to DNS zone.
 
     Format: "instance_name=dns.zone,another_instance=other.zone"
     Returns: dict with instance_name -> zone
     """
-    if not WG_INSTANCES_ZONES:
+    if not WG_INSTANCES_DNSZONES:
         return {}
 
     mapping = {}
-    for part in WG_INSTANCES_ZONES.split(","):
+    for part in WG_INSTANCES_DNSZONES.split(","):
         part = part.strip()
         if not part:
             continue
 
         parts = part.split("=", 1)
         if len(parts) != 2:
-            logging.warning(f"Invalid WG_INSTANCES_ZONES entry: {part}")
+            logging.warning(f"Invalid WG_INSTANCES_DNSZONES entry: {part}")
             continue
 
         instance_name, zone = parts[0].strip(), parts[1].strip()
@@ -493,7 +493,7 @@ def parse_wg_instances_zones():
 
 def process_wireguard_clients():
     """Process WireGuard clients and create DNS records for them."""
-    if not ENABLE_WIREGUARD or not WG_INSTANCES_ZONES:
+    if not ENABLE_WIREGUARD_DNS or not WG_INSTANCES_DNSZONES:
         return set()
 
     wg_servers = get_wireguard_servers()
@@ -708,7 +708,7 @@ def run():
             sync_records(zones, match)
 
         # Process WireGuard clients if enabled
-        if ENABLE_WIREGUARD:
+        if ENABLE_WIREGUARD_DNS:
             wg_matches = process_wireguard_clients()
             new_wg_matches = wg_matches - previous_wg_matches
             for match in new_wg_matches:
@@ -721,7 +721,7 @@ def run():
             logging.info(f"Performing periodic refresh of all DNS records")
             for match in matches:
                 sync_records(zones, match)
-            if ENABLE_WIREGUARD:
+            if ENABLE_WIREGUARD_DNS:
                 for match in previous_wg_matches:
                     sync_wg_records(match)
             refresh_counter = 0
@@ -750,7 +750,7 @@ if __name__ == "__main__":
     logging.info("OPNSENSE_URL: {}".format(OPNSENSE_URL))
     logging.info("TECHNITIUM_URL: {}".format(TECHNITIUM_URL))
     logging.info("VERIFY_HTTPS: {}".format(VERIFY_HTTPS))
-    logging.info("ENABLE_WIREGUARD: {}".format(ENABLE_WIREGUARD))
-    if ENABLE_WIREGUARD:
-        logging.info("WG_INSTANCES_ZONES: {}".format(WG_INSTANCES_ZONES))
+    logging.info("ENABLE_WIREGUARD_DNS: {}".format(ENABLE_WIREGUARD_DNS))
+    if ENABLE_WIREGUARD_DNS:
+        logging.info("WG_INSTANCES_DNSZONES: {}".format(WG_INSTANCES_DNSZONES))
     run()
