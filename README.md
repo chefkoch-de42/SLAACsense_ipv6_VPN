@@ -35,7 +35,7 @@ You can optionally set the `DOCKER_IMAGE` environment variable to use a specific
 | `TECHNITIUM_PTR_ONLY_OVERWRITE`        | (Optional) Overwrite PTR records if they point to a different target (only for IPv6 GUA)                    | `false` (defaults to false)                                            |
 | `ENABLE_WIREGUARD_DNS`                 | Enable WireGuard client DNS record synchronization                                                        | `false` (defaults to false)                                            |
 | `WG_INSTANCES_DNSZONES`                | Map WireGuard instance names to DNS zones (comma-separated)                                               | `wg1=vpn-wg1.example1.com,another=vpn2.example.com`                    |
-| `DEBUG_MODE`                           | (Optional) Enable detailed debug logging for DNS operations (add/delete/update, modes, cycles)             | `false` (defaults to false)                                            |
+| `LOG_LEVEL`                            | (Optional) Logging level: DEBUG, INFO, WARNING, ERROR                                                      | `INFO` (defaults to INFO)                                              |
 
 ### DNS_ZONE_SUBNETS Format
 
@@ -90,14 +90,16 @@ Example: A WireGuard client named `client-laptop` with tunnel address `10.99.99.
 ### Debug Mode
 When troubleshooting DNS synchronization issues, you can enable detailed debug logging:
 
-1. Set `DEBUG_MODE=true` in your environment variables
-2. Debug logs will show:
-   - Sync mode (DHCP/SLAAC or WireGuard) for each host
-   - IPv4 and IPv6 address details (ULA vs GUA separation)
-   - Existing vs new DNS records being synced
-   - Individual add/delete/update operations
-   - Refresh cycle progress and host counts
-   - Number of new/changed hosts being processed
+1. Set `LOG_LEVEL=DEBUG` in your environment variables
+   - Debug logs will show all add/delete/update DNS operations
+   - Shows sync mode (DHCP/SLAAC or WireGuard) for each host
+   - Displays IPv6 address details (ULA vs GUA separation)
+   - Shows refresh cycle progress and host counts
+
+2. View debug logs with:
+   ```bash
+   $ docker logs slaacsense | grep "\[DEBUG\]"
+   ```
 
 Example debug output:
 ```
@@ -114,6 +116,7 @@ Example debug output:
 [DEBUG] Adding A record: laptop.home.example.com => 192.168.1.10
 [DEBUG] Adding AAAA record: laptop.home.example.com => fd00::1
 ```
+
 
 ### Contributing:
 I welcome contributions! Feel free to submit issues, feature requests, or pull requests.

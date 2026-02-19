@@ -28,3 +28,5 @@ services:
       - WG_INSTANCES_DNSZONES=${WG_INSTANCES_DNSZONES}
       # Debug mode
       - DEBUG_MODE=${DEBUG_MODE}
+      # optional: override logging level (DEBUG, INFO, WARNING, ERROR)
+      - LOG_LEVEL=${LOG_LEVEL}

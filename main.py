@@ -36,14 +36,19 @@ TECHNITIUM_PTR_ONLY_OVERWRITE = ((os.getenv("TECHNITIUM_PTR_ONLY_OVERWRITE") or 
 WG_INSTANCES_DNSZONES = os.getenv("WG_INSTANCES_DNSZONES") or None
 ENABLE_WIREGUARD_DNS = ((os.getenv("ENABLE_WIREGUARD_DNS") or "false").lower() == "true")
 
-# Debug mode
-DEBUG_MODE = ((os.getenv("DEBUG_MODE") or "false").lower() == "true")
+def is_debug_enabled():
+    """Check if DEBUG logging is enabled."""
+    return logging.getLogger().getEffectiveLevel() <= logging.DEBUG
 
 def get_opnsense_data(path):
+    if is_debug_enabled():
+        logging.debug(f"[DEBUG] [OPNsense API] GET {path}")
     r = requests.get(url=OPNSENSE_URL + path, verify=VERIFY_HTTPS, auth=(OPNSENSE_API_KEY, OPNSENSE_API_SECRET))
     if r.status_code != 200:
         logging.error("Error occurred" + str(r.status_code) + ": " + r.text)
         return None
+    if is_debug_enabled():
+        logging.debug(f"[DEBUG] [OPNsense API] Response: {r.status_code} OK")
     return r.json()
 
 
@@ -143,6 +148,9 @@ def get_dhcp4_leases_v2():
     if not isinstance(rows, list):
         return data
 
+    if is_debug_enabled():
+        logging.debug(f"[DEBUG] [OPNsense API] Retrieved {len(rows)} total DHCP leases")
+
     # Collect all allowed IPv4 networks across all zones
     allowed_nets: list[ipaddress.IPv4Network] = [
         net for nets, _zone in parse_zone_subnets()
@@ -172,6 +180,9 @@ def get_dhcp4_leases_v2():
         v4_rows.append(row)
 
     data["rows"] = v4_rows
+
+    if is_debug_enabled():
+        logging.debug(f"[DEBUG] [OPNsense API] Filtered to {len(v4_rows)} IPv4 leases in configured subnets")
 
     # Keep counters consistent if present
     if "rowCount" in data:
@@ -252,6 +263,10 @@ def technitium_get(path: str, params: dict | None = None):
     url = f"{TECHNITIUM_URL}{path}"
     params = dict(params or {})
     params.setdefault("token", TECHNITIUM_TOKEN)
+    if is_debug_enabled():
+        # Log without token for security
+        params_log = {k: v for k, v in params.items() if k != "token"}
+        logging.debug(f"[DEBUG] [Technitium API] GET {path} params={params_log}")
     return requests.get(url=url, params=params, verify=VERIFY_HTTPS)
 
 
@@ -276,6 +291,8 @@ def technitium_request(path: str, params: dict | None = None, *, action: str = "
         return False, {}
 
     if payload.get("status") == "ok":
+        if is_debug_enabled():
+            logging.debug(f"[DEBUG] [Technitium API] {action}: SUCCESS")
         return True, payload
 
     msg = payload.get("errorMessage") or payload.get("message") or str(payload)
@@ -309,7 +326,10 @@ def technitium_list_zones() -> list[str]:
             elif isinstance(z, dict) and isinstance(z.get("name"), str):
                 zones.append(z["name"])
 
-    return sorted(set(zones))
+    zones = sorted(set(zones))
+    if is_debug_enabled():
+        logging.debug(f"[DEBUG] [Technitium API] Found {len(zones)} zones: {zones}")
+    return zones
 
 
 @lru_cache(maxsize=1)
@@ -368,6 +388,8 @@ def reverse_record_name_for_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address
 
 
 def technitium_create_zone(zone: str, zone_type: str = "Primary") -> bool:
+    if is_debug_enabled():
+        logging.debug(f"[DEBUG] [Technitium API] Creating zone '{zone}' (type={zone_type})")
     base_params = {
         "zone": zone,
         "type": zone_type,
@@ -414,7 +436,12 @@ def ensure_reverse_zone_for_ip(ip_str: str) -> bool:
     zone_name = reverse_zone_name_for_ip(ip)
     zones = technitium_zone_set()
 
+    if is_debug_enabled():
+        logging.debug(f"[DEBUG] [Technitium API] Checking reverse zone '{zone_name}' for IP {ip_str}")
+
     if zone_name in zones:
+        if is_debug_enabled():
+            logging.debug(f"[DEBUG] [Technitium API] Reverse zone '{zone_name}' already exists")
         return True
 
     logging.warning(f"Missing reverse zone '{zone_name}' for IP {ip_str}; creating it...")
@@ -422,6 +449,8 @@ def ensure_reverse_zone_for_ip(ip_str: str) -> bool:
 
 
 def get_existing_records(domain, zone):
+    if is_debug_enabled():
+        logging.debug(f"[DEBUG] [Technitium API] Querying records for {domain}.{zone}")
     ok, payload = technitium_request(
         "/api/zones/records/get",
         params={
@@ -432,11 +461,14 @@ def get_existing_records(domain, zone):
     )
     if not ok:
         return []
-    return (payload.get("response", {}) or {}).get("records", [])
+    records = (payload.get("response", {}) or {}).get("records", [])
+    if is_debug_enabled():
+        logging.debug(f"[DEBUG] [Technitium API] Found {len(records)} existing records for {domain}.{zone}")
+    return records
 
 
 def delete_record(zone, domain, record_type, value):
-    if DEBUG_MODE:
+    if is_debug_enabled():
         logging.debug(f"[DEBUG] Deleting {record_type} record: {domain}.{zone} => {value}")
     ok, _payload = technitium_request(
         "/api/zones/records/delete",
@@ -454,7 +486,7 @@ def delete_record(zone, domain, record_type, value):
 
 
 def add_record(zone, domain, record_type, ip):
-    if DEBUG_MODE:
+    if is_debug_enabled():
         logging.debug(f"[DEBUG] Adding {record_type} record: {domain}.{zone} => {ip}")
     # ptr=true will fail if the corresponding reverse zone does not exist; ensure it proactively.
     ensure_reverse_zone_for_ip(ip)
@@ -516,7 +548,7 @@ def add_ptr_only(zone: str, domain: str, ip: str):
     if not domain:
         return
 
-    if DEBUG_MODE:
+    if is_debug_enabled():
         logging.debug(f"[DEBUG] Adding PTR-only record: {ip} => {domain}.{zone}")
 
     ensure_reverse_zone_for_ip(ip)
@@ -741,7 +773,7 @@ def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, fo
     ip6s_ula = [ip.compressed for ip in ip6s_all if isinstance(ip, ipaddress.IPv6Address) and ip.is_private and not ip.is_link_local]
     ip6s_gua = [ip.compressed for ip in ip6s_all if isinstance(ip, ipaddress.IPv6Address) and (not ip.is_private) and (not ip.is_link_local)]
 
-    if DEBUG_MODE:
+    if is_debug_enabled():
         logging.debug(f"[DEBUG] Syncing {mode} records for {hostname} in zone {zone}")
         logging.debug(f"[DEBUG]   IPv4: {ip4}")
         logging.debug(f"[DEBUG]   IPv6 ULA: {ip6s_ula}")
@@ -762,7 +794,7 @@ def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, fo
     else:
         current_v6 = set(ip6s_ula)
 
-    if DEBUG_MODE:
+    if is_debug_enabled():
         logging.debug(f"[DEBUG]   Publishing IPv4: {bool(current_v4)}, IPv6: {bool(current_v6)}")
         logging.debug(f"[DEBUG]   Existing A records: {existing_v4}")
         logging.debug(f"[DEBUG]   Existing AAAA records: {existing_v6}")
@@ -837,12 +869,12 @@ def run():
             continue
         matches = build_matches(ndp, leases)
 
-        if DEBUG_MODE:
+        if is_debug_enabled():
             logging.debug(f"[DEBUG] Cycle {refresh_counter + 1}/{REFRESH_CYCLE} - Found {len(matches)} DHCP/SLAAC hosts")
 
         # Process new/changed matches - sync forward records AND PTRs immediately
         new_matches = matches - previous_matches
-        if DEBUG_MODE and new_matches:
+        if is_debug_enabled() and new_matches:
             logging.debug(f"[DEBUG] Processing {len(new_matches)} new/changed DHCP/SLAAC hosts")
         for match in new_matches:
             result = sync_records(zones, match)
@@ -857,10 +889,10 @@ def run():
         # Process WireGuard clients if enabled
         if ENABLE_WIREGUARD_DNS:
             wg_matches = process_wireguard_clients()
-            if DEBUG_MODE:
+            if is_debug_enabled():
                 logging.debug(f"[DEBUG] Found {len(wg_matches)} WireGuard clients")
             new_wg_matches = wg_matches - previous_wg_matches
-            if DEBUG_MODE and new_wg_matches:
+            if is_debug_enabled() and new_wg_matches:
                 logging.debug(f"[DEBUG] Processing {len(new_wg_matches)} new/changed WireGuard clients")
             for match in new_wg_matches:
                 result = sync_records(zones, match, publish_gua_as_aaaa=True, force_ipv4=True)
@@ -877,7 +909,7 @@ def run():
         refresh_counter += 1
         if refresh_counter >= REFRESH_CYCLE:
             logging.info(f"Performing periodic refresh of all DNS records and PTRs (cycle {refresh_counter}/{REFRESH_CYCLE})")
-            if DEBUG_MODE:
+            if is_debug_enabled():
                 logging.debug(f"[DEBUG] Refreshing {len(matches)} DHCP/SLAAC hosts")
             for match in matches:
                 result = sync_records(zones, match)
@@ -885,7 +917,7 @@ def run():
                     ptr_cache[match] = result
                     sync_ptrs(*result)
             if ENABLE_WIREGUARD_DNS:
-                if DEBUG_MODE:
+                if is_debug_enabled():
                     logging.debug(f"[DEBUG] Refreshing {len(previous_wg_matches)} WireGuard clients")
                 for match in previous_wg_matches:
                     result = sync_records(zones, match, publish_gua_as_aaaa=True, force_ipv4=True)
@@ -907,7 +939,9 @@ def verify_env() -> bool:
     return True
 
 if __name__ == "__main__":
-    logging.getLogger().setLevel(os.getenv("LOG_LEVEL", "INFO"))
+    # Set logging level: defaults to INFO, can be overridden with LOG_LEVEL env var
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    logging.getLogger().setLevel(log_level)
     logging.info("loading environment...")
 
     if not verify_env():
@@ -924,7 +958,6 @@ if __name__ == "__main__":
     logging.info("CLOCK: {} seconds".format(CLOCK))
     logging.info("REFRESH_CYCLE: {} cycles".format(REFRESH_CYCLE))
     logging.info("ENABLE_WIREGUARD_DNS: {}".format(ENABLE_WIREGUARD_DNS))
-    logging.info("DEBUG_MODE: {}".format(DEBUG_MODE))
     if ENABLE_WIREGUARD_DNS:
         logging.info("WG_INSTANCES_DNSZONES: {}".format(WG_INSTANCES_DNSZONES))
     run()
