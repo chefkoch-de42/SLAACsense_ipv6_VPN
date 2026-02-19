@@ -2,7 +2,7 @@ version: '3.6'
 services:
   slaacsense:
     image: ${DOCKER_IMAGE:-ghcr.io/notherealmarco/slaacsense:latest}
-    build: .
+    #build: .
     container_name: slaacsense
     restart: unless-stopped
     environment:
