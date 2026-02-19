@@ -22,7 +22,7 @@ You can optionally set the `DOCKER_IMAGE` environment variable to use a specific
 | `OPNSENSE_API_SECRET`                  | OPNsense API secret                                                                                          | `a_very_secret_token` (required)                                       |
 | `TECHNITIUM_URL`                       | The base URL of your Technitium DNS instance                                                                 | `dns.myawesomehome.home.arpa` (required)                               |
 | `TECHNITIUM_TOKEN`                     | Technitium DNS token                                                                                         | `another_very_secret_token` (required)                                 |
-| `DNS_ZONE_SUBNETS`                     | Comma separated DNS zones and IPv4 subnet                                                                    | `192.168.1.0/24=lan.home.arpa,192.168.2.0/24=dmz.home.arpa` (required) |
+| `DNS_ZONE_SUBNETS`                     | DNS zones with their IPv4/IPv6 subnets (see format below)                                                    | `home.example.com=192.168.10.0/24,fd00::/48` (required)               |
 | `DO_V4`                                | If set to true, A records will be configured, otherwise only AAAA records are configured                     | `false` (defaults to false)                                            |
 | `IGNORE_LINK_LOCAL`                    | If set to true, link local IPv6 addresses wil be ignored                                                     | `true` (defaults to true)                                              |
 | `VERIFY_HTTPS`                         | Verify OPNsense and Technitium's SSL certificates                                                            | `true` (defaults to true)                                              |
@@ -34,6 +34,33 @@ You can optionally set the `DOCKER_IMAGE` environment variable to use a specific
 | `TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG` | (Optional) Retry creating reverse zones without catalog if catalog permissions are missing               | `true` (defaults to true)                                              |
 | `ENABLE_WIREGUARD_DNS`                 | Enable WireGuard client DNS record synchronization                                                        | `false` (defaults to false)                                            |
 | `WG_INSTANCES_DNSZONES`                | Map WireGuard instance names to DNS zones (comma-separated)                                               | `wg1=vpn-wg1.example1.com,another=vpn2.example.com`                    |
+
+### DNS_ZONE_SUBNETS Format
+
+> ⚠️ **Breaking Change:** The format of `DNS_ZONE_SUBNETS` has changed in this version.
+> The legacy format (`subnet=zone`) is still supported for backwards compatibility, but the new format is recommended.
+> **If you are upgrading, your existing configuration will continue to work without changes.**
+
+`DNS_ZONE_SUBNETS` supports two formats:
+
+**New format (recommended):** `zone=subnet1,subnet2,...;zone2=subnet3,...`
+- Zones are separated by `;`
+- Multiple subnets (IPv4 and/or IPv6) per zone are separated by `,`
+- IPv6 subnets are used to filter NDP entries — only IPv6 addresses belonging to a configured subnet are published
+
+```
+DNS_ZONE_SUBNETS=home.example.com=192.168.10.0/24,fd00::/48;office.example.com=192.168.20.0/24,fd01::/48
+```
+
+**Legacy format (still supported):** `subnet=zone,subnet2=zone2`
+- Each subnet maps to exactly one zone
+- IPv6 subnets are not supported in legacy format
+
+```
+DNS_ZONE_SUBNETS=192.168.10.0/24=home.example.com,192.168.20.0/24=office.example.com
+```
+
+> **Note:** Without IPv6 subnets configured, all ULA addresses seen in the NDP table for a host are published — including addresses from other interfaces or VLANs. Adding IPv6 subnets restricts publishing to only matching addresses.
 
 ### Note
 You have to create the corresponding forward DNS zones in the Technitium dashboard (primary or conditional forwarder zones).

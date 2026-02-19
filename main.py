@@ -43,6 +43,88 @@ def get_opnsense_data(path):
         return None
     return r.json()
 
+
+def parse_zone_subnets() -> list[tuple[list[ipaddress.IPv4Network | ipaddress.IPv6Network], str]]:
+    """Parse DNS_ZONE_SUBNETS into a list of (networks, zone_name) tuples.
+
+    Supported formats:
+      New: zone=subnet1,subnet2;zone2=subnet3,subnet4
+           e.g. home.example.com=192.168.10.0/24,fd00::/48;office.example.com=192.168.20.0/24
+
+      Legacy: subnet=zone,subnet2=zone2
+              e.g. 192.168.10.0/24=home.example.com,192.168.20.0/24=office.example.com
+
+    Returns list of ([network, ...], zone_name) - each zone can have multiple v4/v6 subnets.
+    """
+    if not DNS_ZONE_SUBNETS:
+        return []
+
+    raw = DNS_ZONE_SUBNETS.strip()
+
+    # Detect format: new format uses ';' as zone separator
+    if ";" in raw or (raw.count("=") == 1) or _is_new_format(raw):
+        return _parse_new_format(raw)
+    else:
+        return _parse_legacy_format(raw)
+
+
+def _is_new_format(raw: str) -> bool:
+    """Heuristic: if the part before '=' looks like a hostname (not a CIDR), it's new format."""
+    first = raw.split(",")[0].split("=")[0].strip()
+    try:
+        ipaddress.ip_network(first, strict=False)
+        return False  # it's a network → legacy format
+    except ValueError:
+        return True  # it's a zone name → new format
+
+
+def _parse_new_format(raw: str) -> list[tuple[list, str]]:
+    """Parse: zone=subnet1,subnet2;zone2=subnet3
+    Semicolons separate zones; commas separate subnets within a zone.
+    """
+    result = []
+    for zone_part in raw.split(";"):
+        zone_part = zone_part.strip()
+        if not zone_part:
+            continue
+        if "=" not in zone_part:
+            logging.warning(f"DNS_ZONE_SUBNETS: skipping invalid zone entry (no '='): {zone_part}")
+            continue
+        zone_name, subnets_str = zone_part.split("=", 1)
+        zone_name = zone_name.strip()
+        nets = []
+        for subnet in subnets_str.split(","):
+            subnet = subnet.strip()
+            if not subnet:
+                continue
+            try:
+                nets.append(ipaddress.ip_network(subnet, strict=False))
+            except ValueError:
+                logging.warning(f"DNS_ZONE_SUBNETS: invalid subnet '{subnet}' for zone '{zone_name}', skipping")
+        if nets:
+            result.append((nets, zone_name))
+        else:
+            logging.warning(f"DNS_ZONE_SUBNETS: zone '{zone_name}' has no valid subnets, skipping")
+    return result
+
+
+def _parse_legacy_format(raw: str) -> list[tuple[list, str]]:
+    """Parse legacy: subnet=zone,subnet2=zone2"""
+    result = []
+    for part in raw.split(","):
+        part = part.strip().replace("\\=", "=")
+        if not part or "=" not in part:
+            continue
+        subnet_str, zone_name = part.split("=", 1)
+        subnet_str = subnet_str.strip()
+        zone_name = zone_name.strip()
+        try:
+            net = ipaddress.ip_network(subnet_str, strict=False)
+            result.append(([net], zone_name))
+        except ValueError:
+            logging.warning(f"DNS_ZONE_SUBNETS: invalid subnet '{subnet_str}', skipping")
+    return result
+
 def get_ndp():
     return get_opnsense_data("/api/diagnostics/interface/search_ndp")
 
@@ -58,29 +140,14 @@ def get_dhcp4_leases_v2():
     if not isinstance(rows, list):
         return data
 
-    # Build a list of allowed IPv4 networks from DNS_ZONE_SUBNETS.
-    # Format: "192.168.1.0/24=zone.example,192.168.2.0/24=...".
-    # Users may escape '=' in env files; we support both '=' and '\='.
-    allowed_nets: list[ipaddress.IPv4Network] = []
-    if DNS_ZONE_SUBNETS:
-        for part in DNS_ZONE_SUBNETS.split(","):
-            part = part.strip()
-            if not part:
-                continue
+    # Collect all allowed IPv4 networks across all zones
+    allowed_nets: list[ipaddress.IPv4Network] = [
+        net for nets, _zone in parse_zone_subnets()
+        for net in nets
+        if isinstance(net, ipaddress.IPv4Network)
+    ]
 
-            # normalize possible escaped '='
-            part_norm = part.replace("\\=", "=")
-            subnet = part_norm.split("=", 1)[0].strip()
-            try:
-                net = ipaddress.ip_network(subnet, strict=False)
-            except ValueError:
-                logging.warning(f"Invalid subnet in DNS_ZONE_SUBNETS ignored: {subnet}")
-                continue
-
-            if isinstance(net, ipaddress.IPv4Network):
-                allowed_nets.append(net)
-
-    # Filter out IPv6 entries and IPv4 entries not in DNS_ZONE_SUBNETS.
+    # Filter out IPv6 entries and IPv4 entries not in any configured subnet
     v4_rows = []
     for row in rows:
         if not isinstance(row, dict):
@@ -123,6 +190,13 @@ def build_matches(ndp, leases):
     matches = set()
     hostname_to_macs = defaultdict(lambda: defaultdict(list))
 
+    # Collect all allowed IPv6 networks across all zones
+    allowed_v6_nets: list[ipaddress.IPv6Network] = [
+        net for nets, _zone in parse_zone_subnets()
+        for net in nets
+        if isinstance(net, ipaddress.IPv6Network)
+    ]
+
     for e in leases["rows"]:
         ip6s = tuple(
             x["ip"].split("%")[0] for x in ndp["rows"]
@@ -130,6 +204,15 @@ def build_matches(ndp, leases):
         )
         if IGNORE_LINK_LOCAL:
             ip6s = tuple(ip for ip in ip6s if not ipaddress.ip_address(ip).is_link_local)
+
+        # If IPv6 subnets are configured in DNS_ZONE_SUBNETS, only keep IPv6 addresses
+        # that belong to one of those subnets — prevents leaking IPv6 from other interfaces/zones
+        if allowed_v6_nets:
+            ip6s = tuple(
+                ip for ip in ip6s
+                if any(ipaddress.ip_address(ip) in net for net in allowed_v6_nets)
+            )
+
         if len(ip6s) == 0 and not DO_V4:
             continue
 
@@ -151,9 +234,14 @@ def build_matches(ndp, leases):
 
     return adjusted_matches
 
-def find_zone(zones, ip4):
-    for zone in zones:
-        if ip4 in zone[0]: return zone[1]
+def find_zone(zones: list[tuple[list, str]], ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    """Find the DNS zone for a given IP address.
+
+    zones is a list of ([network, ...], zone_name) as returned by parse_zone_subnets().
+    """
+    for nets, zone_name in zones:
+        if any(ip in net for net in nets):
+            return zone_name
     return None
 
 def technitium_get(path: str, params: dict | None = None):
@@ -706,10 +794,10 @@ def run():
     # Used to avoid re-querying Technitium for PTR sync on unchanged matches
     ptr_cache: dict = {}
     wg_ptr_cache: dict = {}
-    zones = []
-    for z in DNS_ZONE_SUBNETS.split(","):
-        zone = z.split("=")
-        zones.append((ipaddress.ip_network(zone[0]), zone[1]))
+    zones = parse_zone_subnets()
+    if not zones:
+        logging.error("No valid zones parsed from DNS_ZONE_SUBNETS, aborting")
+        return
 
     refresh_counter = 0
 
