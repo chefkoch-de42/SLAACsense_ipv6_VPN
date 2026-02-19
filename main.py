@@ -881,7 +881,12 @@ if __name__ == "__main__":
     logging.info("Starting SLAACsense...")
     logging.info("OPNSENSE_URL: {}".format(OPNSENSE_URL))
     logging.info("TECHNITIUM_URL: {}".format(TECHNITIUM_URL))
+    logging.info("DNS_ZONE_SUBNETS: {}".format(DNS_ZONE_SUBNETS))
+    logging.info("DO_V4: {}".format(DO_V4))
+    logging.info("IGNORE_LINK_LOCAL: {}".format(IGNORE_LINK_LOCAL))
     logging.info("VERIFY_HTTPS: {}".format(VERIFY_HTTPS))
+    logging.info("CLOCK: {} seconds".format(CLOCK))
+    logging.info("REFRESH_CYCLE: {} cycles".format(REFRESH_CYCLE))
     logging.info("ENABLE_WIREGUARD_DNS: {}".format(ENABLE_WIREGUARD_DNS))
     if ENABLE_WIREGUARD_DNS:
         logging.info("WG_INSTANCES_DNSZONES: {}".format(WG_INSTANCES_DNSZONES))
