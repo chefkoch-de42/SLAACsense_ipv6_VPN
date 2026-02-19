@@ -373,8 +373,7 @@ def add_record(zone, domain, record_type, ip):
             "ttl": 5,
             "expiryTtl": 604800,
             "overwrite": "false",
-            "ptr": "true",
-            "createPtrZone": "true",
+            "ptr": "false",
             "comments": "slaacsense",
             "ipAddress": ip,
         },
@@ -677,10 +676,22 @@ def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, fo
     for ip in current_v6 - existing_v6:
         add_record(zone, hostname, "AAAA", ip)
 
-    # Ensure PTRs exist for all relevant IPs:
-    # - IPv4: PTR is handled by add_record(A, ptr=true) when DO_V4 is enabled.
-    # - IPv6 ULA: PTR is handled by add_record(AAAA, ptr=true).
-    # - IPv6 GUA: PTR only (no AAAA!) - only for DHCP/SLAAC mode
+    return zone, hostname, current_v4, ip6s_ula, ip6s_gua
+
+
+def sync_ptrs(zone, hostname, current_v4, ip6s_ula, ip6s_gua, publish_gua_as_aaaa=False):
+    """Explicitly sync PTR records for all given IPs.
+
+    Called separately so PTR sync can be deferred to refresh cycles,
+    except for newly seen IPs which always trigger an immediate PTR sync.
+    """
+    for ip in current_v4:
+        add_ptr_only(zone, hostname, ip)
+
+    for ip in ip6s_ula:
+        add_ptr_only(zone, hostname, ip)
+
+    # IPv6 GUA: PTR only (no AAAA!) - only for DHCP/SLAAC mode
     if not publish_gua_as_aaaa:
         for ip in ip6s_gua:
             add_ptr_only(zone, hostname, ip)
@@ -691,6 +702,10 @@ def run():
 
     previous_matches = set()
     previous_wg_matches = set()
+    # Cache: maps match-tuple -> (zone, hostname, current_v4, ip6s_ula, ip6s_gua)
+    # Used to avoid re-querying Technitium for PTR sync on unchanged matches
+    ptr_cache: dict = {}
+    wg_ptr_cache: dict = {}
     zones = []
     for z in DNS_ZONE_SUBNETS.split(","):
         zone = z.split("=")
@@ -711,28 +726,48 @@ def run():
             continue
         matches = build_matches(ndp, leases)
 
-        # Process new matches (hosts that appeared or changed)
+        # Process new/changed matches - sync forward records AND PTRs immediately
         new_matches = matches - previous_matches
         for match in new_matches:
-            sync_records(zones, match)
+            result = sync_records(zones, match)
+            if result:
+                ptr_cache[match] = result
+                sync_ptrs(*result)
+
+        # Remove stale entries from PTR cache
+        for gone in previous_matches - matches:
+            ptr_cache.pop(gone, None)
 
         # Process WireGuard clients if enabled
         if ENABLE_WIREGUARD_DNS:
             wg_matches = process_wireguard_clients()
             new_wg_matches = wg_matches - previous_wg_matches
             for match in new_wg_matches:
-                sync_records(zones, match, publish_gua_as_aaaa=True, force_ipv4=True)
+                result = sync_records(zones, match, publish_gua_as_aaaa=True, force_ipv4=True)
+                if result:
+                    wg_ptr_cache[match] = result
+                    sync_ptrs(*result, publish_gua_as_aaaa=True)
+
+            for gone in previous_wg_matches - wg_matches:
+                wg_ptr_cache.pop(gone, None)
+
             previous_wg_matches = wg_matches
 
-        # Every REFRESH_CYCLE iterations, refresh all records to prevent expiration
+        # Every REFRESH_CYCLE iterations, refresh ALL forward records and PTRs
         refresh_counter += 1
         if refresh_counter >= REFRESH_CYCLE:
-            logging.info(f"Performing periodic refresh of all DNS records")
+            logging.info("Performing periodic refresh of all DNS records and PTRs")
             for match in matches:
-                sync_records(zones, match)
+                result = sync_records(zones, match)
+                if result:
+                    ptr_cache[match] = result
+                    sync_ptrs(*result)
             if ENABLE_WIREGUARD_DNS:
                 for match in previous_wg_matches:
-                    sync_records(zones, match, publish_gua_as_aaaa=True, force_ipv4=True)
+                    result = sync_records(zones, match, publish_gua_as_aaaa=True, force_ipv4=True)
+                    if result:
+                        wg_ptr_cache[match] = result
+                        sync_ptrs(*result, publish_gua_as_aaaa=True)
             refresh_counter = 0
 
         previous_matches = matches
