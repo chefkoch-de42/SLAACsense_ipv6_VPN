@@ -837,8 +837,13 @@ def run():
             continue
         matches = build_matches(ndp, leases)
 
+        if DEBUG_MODE:
+            logging.debug(f"[DEBUG] Cycle {refresh_counter + 1}/{REFRESH_CYCLE} - Found {len(matches)} DHCP/SLAAC hosts")
+
         # Process new/changed matches - sync forward records AND PTRs immediately
         new_matches = matches - previous_matches
+        if DEBUG_MODE and new_matches:
+            logging.debug(f"[DEBUG] Processing {len(new_matches)} new/changed DHCP/SLAAC hosts")
         for match in new_matches:
             result = sync_records(zones, match)
             if result:
@@ -852,7 +857,11 @@ def run():
         # Process WireGuard clients if enabled
         if ENABLE_WIREGUARD_DNS:
             wg_matches = process_wireguard_clients()
+            if DEBUG_MODE:
+                logging.debug(f"[DEBUG] Found {len(wg_matches)} WireGuard clients")
             new_wg_matches = wg_matches - previous_wg_matches
+            if DEBUG_MODE and new_wg_matches:
+                logging.debug(f"[DEBUG] Processing {len(new_wg_matches)} new/changed WireGuard clients")
             for match in new_wg_matches:
                 result = sync_records(zones, match, publish_gua_as_aaaa=True, force_ipv4=True)
                 if result:
@@ -867,13 +876,17 @@ def run():
         # Every REFRESH_CYCLE iterations, refresh ALL forward records and PTRs
         refresh_counter += 1
         if refresh_counter >= REFRESH_CYCLE:
-            logging.info("Performing periodic refresh of all DNS records and PTRs")
+            logging.info(f"Performing periodic refresh of all DNS records and PTRs (cycle {refresh_counter}/{REFRESH_CYCLE})")
+            if DEBUG_MODE:
+                logging.debug(f"[DEBUG] Refreshing {len(matches)} DHCP/SLAAC hosts")
             for match in matches:
                 result = sync_records(zones, match)
                 if result:
                     ptr_cache[match] = result
                     sync_ptrs(*result)
             if ENABLE_WIREGUARD_DNS:
+                if DEBUG_MODE:
+                    logging.debug(f"[DEBUG] Refreshing {len(previous_wg_matches)} WireGuard clients")
                 for match in previous_wg_matches:
                     result = sync_records(zones, match, publish_gua_as_aaaa=True, force_ipv4=True)
                     if result:

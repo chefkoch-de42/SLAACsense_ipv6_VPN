@@ -26,3 +26,5 @@ services:
       # WireGuard support
       - ENABLE_WIREGUARD_DNS=${ENABLE_WIREGUARD_DNS}
       - WG_INSTANCES_DNSZONES=${WG_INSTANCES_DNSZONES}
+      # Debug mode
+      - DEBUG_MODE=${DEBUG_MODE}
