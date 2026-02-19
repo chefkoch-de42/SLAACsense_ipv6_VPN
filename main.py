@@ -30,6 +30,8 @@ TECHNITIUM_IPV6_PTR_PREFIXLEN = int(os.getenv("TECHNITIUM_IPV6_PTR_PREFIXLEN") o
 TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG = ((os.getenv("TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG") or "true").lower() == "true")
 # If a PTR-only record exists but points somewhere else, replace it (delete+add).
 TECHNITIUM_PTR_ONLY_OVERWRITE = ((os.getenv("TECHNITIUM_PTR_ONLY_OVERWRITE") or "false").lower() == "true")
+# If true, create PTR-only records for IPv6 GUA addresses found in NDP table (no AAAA record published).
+TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY = ((os.getenv("TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY") or "false").lower() == "true")
 
 # WireGuard support
 # Format: "wg_instance_name=dns.zone,another_instance=other.zone"
@@ -212,20 +214,30 @@ def build_matches(ndp, leases):
     ]
 
     for e in leases["rows"]:
-        ip6s = tuple(
+        # All non-link-local IPv6 addresses for this host from NDP
+        all_ip6s = tuple(
             x["ip"].split("%")[0] for x in ndp["rows"]
             if x["mac"] == e["hwaddr"] and x["intf_description"] == e["if_descr"]
         )
         if IGNORE_LINK_LOCAL:
-            ip6s = tuple(ip for ip in ip6s if not ipaddress.ip_address(ip).is_link_local)
+            all_ip6s = tuple(ip for ip in all_ip6s if not ipaddress.ip_address(ip).is_link_local)
+
+        # GUA addresses: global unicast, not private, not link-local — collected unconditionally
+        # so TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY can use them even if not in DNS_ZONE_SUBNETS
+        gua_ip6s = tuple(
+            ip for ip in all_ip6s
+            if not ipaddress.ip_address(ip).is_private and not ipaddress.ip_address(ip).is_link_local
+        ) if TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY else ()
 
         # If IPv6 subnets are configured in DNS_ZONE_SUBNETS, only keep IPv6 addresses
         # that belong to one of those subnets — prevents leaking IPv6 from other interfaces/zones
         if allowed_v6_nets:
             ip6s = tuple(
-                ip for ip in ip6s
+                ip for ip in all_ip6s
                 if any(ipaddress.ip_address(ip) in net for net in allowed_v6_nets)
             )
+        else:
+            ip6s = all_ip6s
 
         if len(ip6s) == 0 and not DO_V4:
             continue
@@ -235,16 +247,15 @@ def build_matches(ndp, leases):
         if hostname:
             hostname_to_macs[hostname][e["if_descr"]].append(e["hwaddr"])
 
-        matches.add((e["address"], ip6s, hostname, e["if_descr"], e["hwaddr"]))
+        matches.add((e["address"], ip6s, gua_ip6s, hostname, e["if_descr"], e["hwaddr"]))
 
     # Handle duplicate hostnames on the same interface
     adjusted_matches = set()
     for match in matches:
-        ip4, ip6s, hostname, if_descr, mac = match
+        ip4, ip6s, gua_ip6s, hostname, if_descr, mac = match
         if hostname and len(hostname_to_macs[hostname][if_descr]) > 1:
-            # Add the last 4 characters of the MAC address to the hostname
             hostname = f"{hostname}-{mac.replace(':', '')[-4:]}"
-        adjusted_matches.add((ip4, ip6s, hostname))
+        adjusted_matches.add((ip4, ip6s, gua_ip6s, hostname))
 
     return adjusted_matches
 
@@ -744,23 +755,28 @@ def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, fo
 
     Args:
         zones: List of (network, zone_name) tuples
-        match: Tuple of (ipv4, ipv6s_tuple, hostname[, zone]) - zone is optional for WireGuard
-        zone_override: Optional zone name (extracted from match[3] for WireGuard)
+        match: Tuple of:
+               - DHCP/SLAAC: (ipv4, ipv6s_tuple, gua_ip6s_tuple, hostname)
+               - WireGuard:  (ipv4, ipv6s_tuple, hostname, zone)  [legacy 4-tuple, no gua_ip6s]
+        zone_override: Optional zone name override
         publish_gua_as_aaaa: If True, publish GUA addresses as AAAA (for WireGuard)
         force_ipv4: If True, always publish IPv4 records regardless of DO_V4 setting (for WireGuard)
     """
-    # For WireGuard matches: (ip4, ip6s, hostname, zone)
-    # For DHCP matches: (ip4, ip6s, hostname)
+    # Distinguish WireGuard matches (ip4, ip6s, hostname, zone_str)
+    # from DHCP/SLAAC matches (ip4, ip6s, gua_ip6s, hostname)
     if zone_override or (len(match) == 4 and isinstance(match[3], str)):
+        # WireGuard: (ip4, ip6s, hostname, zone)
         zone = zone_override or match[3]
         ip4, ip6s_tuple, hostname = match[0], match[1], match[2]
+        gua_ip6s_tuple = ()
         mode = "WireGuard"
     else:
+        # DHCP/SLAAC: (ip4, ip6s, gua_ip6s, hostname)
         zone = find_zone(zones, ipaddress.ip_address(match[0]))
         if zone is None:
             logging.warning("Could not find a DNS zone for " + match[0])
             return
-        ip4, ip6s_tuple, hostname = match[0], match[1], match[2]
+        ip4, ip6s_tuple, gua_ip6s_tuple, hostname = match[0], match[1], match[2], match[3]
         mode = "DHCP/SLAAC"
 
     if not hostname:
@@ -769,15 +785,20 @@ def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, fo
 
     ip6s_all = [ipaddress.ip_address(x) for x in ip6s_tuple]
 
-    # Separate IPv6 by scope/type
+    # Separate IPv6 by scope/type (from zone-filtered set)
     ip6s_ula = [ip.compressed for ip in ip6s_all if isinstance(ip, ipaddress.IPv6Address) and ip.is_private and not ip.is_link_local]
     ip6s_gua = [ip.compressed for ip in ip6s_all if isinstance(ip, ipaddress.IPv6Address) and (not ip.is_private) and (not ip.is_link_local)]
+
+    # GUA addresses collected unconditionally for PTR-only (DHCP/SLAAC mode only)
+    gua_ptr_only = list(gua_ip6s_tuple) if TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY and not publish_gua_as_aaaa else []
 
     if is_debug_enabled():
         logging.debug(f"[DEBUG] Syncing {mode} records for {hostname} in zone {zone}")
         logging.debug(f"[DEBUG]   IPv4: {ip4}")
         logging.debug(f"[DEBUG]   IPv6 ULA: {ip6s_ula}")
-        logging.debug(f"[DEBUG]   IPv6 GUA: {ip6s_gua}")
+        logging.debug(f"[DEBUG]   IPv6 GUA (in zone): {ip6s_gua}")
+        if gua_ptr_only:
+            logging.debug(f"[DEBUG]   IPv6 GUA (PTR-only): {gua_ptr_only}")
 
     existing_records = get_existing_records(hostname, zone)
     existing_v4 = {ipaddress.ip_address(r["rData"]["ipAddress"]).compressed for r in existing_records if r["type"] == "A"}
@@ -795,7 +816,7 @@ def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, fo
         current_v6 = set(ip6s_ula)
 
     if is_debug_enabled():
-        logging.debug(f"[DEBUG]   Publishing IPv4: {bool(current_v4)}, IPv6: {bool(current_v6)}")
+        logging.debug(f"[DEBUG]   Publishing IPv4: {bool(current_v4)}, IPv6 AAAA: {bool(current_v6)}")
         logging.debug(f"[DEBUG]   Existing A records: {existing_v4}")
         logging.debug(f"[DEBUG]   Existing AAAA records: {existing_v6}")
 
@@ -819,14 +840,16 @@ def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, fo
     for ip in current_v6 - existing_v6:
         add_record(zone, hostname, "AAAA", ip)
 
-    return zone, hostname, current_v4, ip6s_ula, ip6s_gua
+    return zone, hostname, current_v4, ip6s_ula, ip6s_gua, gua_ptr_only
 
 
-def sync_ptrs(zone, hostname, current_v4, ip6s_ula, ip6s_gua, publish_gua_as_aaaa=False):
+def sync_ptrs(zone, hostname, current_v4, ip6s_ula, ip6s_gua, gua_ptr_only=None, publish_gua_as_aaaa=False):
     """Explicitly sync PTR records for all given IPs.
 
     Called separately so PTR sync can be deferred to refresh cycles,
     except for newly seen IPs which always trigger an immediate PTR sync.
+
+    gua_ptr_only: list of GUA IPs to create PTR-only records for (TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY mode)
     """
     for ip in current_v4:
         add_ptr_only(zone, hostname, ip)
@@ -834,9 +857,17 @@ def sync_ptrs(zone, hostname, current_v4, ip6s_ula, ip6s_gua, publish_gua_as_aaa
     for ip in ip6s_ula:
         add_ptr_only(zone, hostname, ip)
 
-    # IPv6 GUA: PTR only (no AAAA!) - only for DHCP/SLAAC mode
+    # IPv6 GUA in-zone: PTR only (no AAAA!) — only for DHCP/SLAAC mode
     if not publish_gua_as_aaaa:
         for ip in ip6s_gua:
+            add_ptr_only(zone, hostname, ip)
+
+    # IPv6 GUA out-of-zone: PTR-only via TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY
+    # The reverse zone for each GUA is created/ensured inside add_ptr_only → ensure_reverse_zone_for_ip
+    if gua_ptr_only:
+        if is_debug_enabled():
+            logging.debug(f"[DEBUG] Creating PTR-only records for {len(gua_ptr_only)} GUA address(es) of {hostname}")
+        for ip in gua_ptr_only:
             add_ptr_only(zone, hostname, ip)
 
 def run():
@@ -845,7 +876,7 @@ def run():
 
     previous_matches = set()
     previous_wg_matches = set()
-    # Cache: maps match-tuple -> (zone, hostname, current_v4, ip6s_ula, ip6s_gua)
+    # Cache: maps match-tuple -> (zone, hostname, current_v4, ip6s_ula, ip6s_gua, gua_ptr_only)
     # Used to avoid re-querying Technitium for PTR sync on unchanged matches
     ptr_cache: dict = {}
     wg_ptr_cache: dict = {}
@@ -957,6 +988,8 @@ if __name__ == "__main__":
     logging.info("VERIFY_HTTPS: {}".format(VERIFY_HTTPS))
     logging.info("CLOCK: {} seconds".format(CLOCK))
     logging.info("REFRESH_CYCLE: {} cycles".format(REFRESH_CYCLE))
+    logging.info("TECHNITIUM_PTR_ONLY_OVERWRITE: {}".format(TECHNITIUM_PTR_ONLY_OVERWRITE))
+    logging.info("TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY: {}".format(TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY))
     logging.info("ENABLE_WIREGUARD_DNS: {}".format(ENABLE_WIREGUARD_DNS))
     if ENABLE_WIREGUARD_DNS:
         logging.info("WG_INSTANCES_DNSZONES: {}".format(WG_INSTANCES_DNSZONES))

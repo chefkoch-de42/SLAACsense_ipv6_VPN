@@ -32,7 +32,8 @@ You can optionally set the `DOCKER_IMAGE` environment variable to use a specific
 | `TECHNITIUM_USE_SOA_SERIAL_DATE_SCHEME`| (Optional) Enable SOA serial date scheme when auto-creating reverse zones                                     | `true` (defaults to true)                                              |
 | `TECHNITIUM_IPV6_PTR_PREFIXLEN`        | (Optional) IPv6 reverse zone prefix length to create (must be divisible by 4, e.g. 48/56/64). Default is /64 | `64` (defaults to 64)                                                  |
 | `TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG` | (Optional) Retry creating reverse zones without catalog if catalog permissions are missing               | `true` (defaults to true)                                              |
-| `TECHNITIUM_PTR_ONLY_OVERWRITE`        | (Optional) Overwrite PTR records if they point to a different target (only for IPv6 GUA)                    | `false` (defaults to false)                                            |
+| `TECHNITIUM_PTR_ONLY_OVERWRITE`        | (Optional) Overwrite PTR records if they point to a different target                                        | `false` (defaults to false)                                            |
+| `TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY`  | (Optional) Create PTR-only records for IPv6 GUA addresses from NDP table, even if not in DNS_ZONE_SUBNETS  | `false` (defaults to false)                                            |
 | `ENABLE_WIREGUARD_DNS`                 | Enable WireGuard client DNS record synchronization                                                        | `false` (defaults to false)                                            |
 | `WG_INSTANCES_DNSZONES`                | Map WireGuard instance names to DNS zones (comma-separated)                                               | `wg1=vpn-wg1.example1.com,another=vpn2.example.com`                    |
 | `LOG_LEVEL`                            | (Optional) Logging level: DEBUG, INFO, WARNING, ERROR                                                      | `INFO` (defaults to INFO)                                              |
@@ -72,6 +73,13 @@ Reverse zones are required for PTR creation. If a reverse zone is missing, SLAAC
 - `catalog=cluster-catalog.dns.local` (configurable via `TECHNITIUM_PTR_CATALOG`)
 
 If the Technitium token does not have permissions to use the catalog zone, SLAACsense will automatically retry creating the reverse zone without a catalog (configurable via `TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG`).
+
+### IPv6 GUA PTR Records
+By default, SLAACsense only creates DNS records for IPv6 addresses that fall within a subnet configured in `DNS_ZONE_SUBNETS`. Global Unicast Addresses (GUA, e.g. `2001:db8::/32`) are typically not listed there and would therefore be skipped entirely.
+
+Set `TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY=true` to additionally create **PTR-only reverse records** for all GUA addresses found in the NDP table for a known host — without publishing a forward AAAA record. The required reverse zone (`ip6.arpa`) is auto-created if missing, using the same mechanism as other reverse zones.
+
+> **Note:** This setting is independent of `DNS_ZONE_SUBNETS`. GUA addresses are collected directly from the NDP table and do not need to match any configured subnet.
 
 ### WireGuard Support
 SLAACsense can also synchronize DNS records for WireGuard VPN clients configured in OPNsense. When enabled, it will:
