@@ -1,0 +1,4 @@
+# Files excluded from Claude Code context (read/write/modify)
+.main.env
+*.env.local
+

@@ -1,0 +1,4 @@
+# Files excluded from GitHub Copilot context (read/write/suggest)
+.main.env
+*.env.local
+
