@@ -762,9 +762,10 @@ def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, fo
         publish_gua_as_aaaa: If True, publish GUA addresses as AAAA (for WireGuard)
         force_ipv4: If True, always publish IPv4 records regardless of DO_V4 setting (for WireGuard)
     """
-    # Distinguish WireGuard matches (ip4, ip6s, hostname, zone_str)
-    # from DHCP/SLAAC matches (ip4, ip6s, gua_ip6s, hostname)
-    if zone_override or (len(match) == 4 and isinstance(match[3], str)):
+    # Distinguish WireGuard matches (ip4, ip6s, hostname_str, zone_str)
+    # from DHCP/SLAAC matches   (ip4, ip6s, gua_ip6s_tuple, hostname_str)
+    # Reliable discriminator: match[2] is a tuple for DHCP/SLAAC, a str for WireGuard
+    if zone_override or (len(match) == 4 and isinstance(match[2], str)):
         # WireGuard: (ip4, ip6s, hostname, zone)
         zone = zone_override or match[3]
         ip4, ip6s_tuple, hostname = match[0], match[1], match[2]
