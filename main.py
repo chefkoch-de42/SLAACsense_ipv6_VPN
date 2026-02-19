@@ -36,6 +36,9 @@ TECHNITIUM_PTR_ONLY_OVERWRITE = ((os.getenv("TECHNITIUM_PTR_ONLY_OVERWRITE") or 
 WG_INSTANCES_DNSZONES = os.getenv("WG_INSTANCES_DNSZONES") or None
 ENABLE_WIREGUARD_DNS = ((os.getenv("ENABLE_WIREGUARD_DNS") or "false").lower() == "true")
 
+# Debug mode
+DEBUG_MODE = ((os.getenv("DEBUG_MODE") or "false").lower() == "true")
+
 def get_opnsense_data(path):
     r = requests.get(url=OPNSENSE_URL + path, verify=VERIFY_HTTPS, auth=(OPNSENSE_API_KEY, OPNSENSE_API_SECRET))
     if r.status_code != 200:
@@ -433,6 +436,8 @@ def get_existing_records(domain, zone):
 
 
 def delete_record(zone, domain, record_type, value):
+    if DEBUG_MODE:
+        logging.debug(f"[DEBUG] Deleting {record_type} record: {domain}.{zone} => {value}")
     ok, _payload = technitium_request(
         "/api/zones/records/delete",
         params={
@@ -449,6 +454,8 @@ def delete_record(zone, domain, record_type, value):
 
 
 def add_record(zone, domain, record_type, ip):
+    if DEBUG_MODE:
+        logging.debug(f"[DEBUG] Adding {record_type} record: {domain}.{zone} => {ip}")
     # ptr=true will fail if the corresponding reverse zone does not exist; ensure it proactively.
     ensure_reverse_zone_for_ip(ip)
 
@@ -508,6 +515,9 @@ def add_ptr_only(zone: str, domain: str, ip: str):
     """Create only a PTR for the given IP without publishing a forward AAAA record."""
     if not domain:
         return
+
+    if DEBUG_MODE:
+        logging.debug(f"[DEBUG] Adding PTR-only record: {ip} => {domain}.{zone}")
 
     ensure_reverse_zone_for_ip(ip)
 
@@ -712,12 +722,14 @@ def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, fo
     if zone_override or (len(match) == 4 and isinstance(match[3], str)):
         zone = zone_override or match[3]
         ip4, ip6s_tuple, hostname = match[0], match[1], match[2]
+        mode = "WireGuard"
     else:
         zone = find_zone(zones, ipaddress.ip_address(match[0]))
         if zone is None:
             logging.warning("Could not find a DNS zone for " + match[0])
             return
         ip4, ip6s_tuple, hostname = match[0], match[1], match[2]
+        mode = "DHCP/SLAAC"
 
     if not hostname:
         logging.warning(f"No hostname found for {ip4}")
@@ -728,6 +740,12 @@ def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, fo
     # Separate IPv6 by scope/type
     ip6s_ula = [ip.compressed for ip in ip6s_all if isinstance(ip, ipaddress.IPv6Address) and ip.is_private and not ip.is_link_local]
     ip6s_gua = [ip.compressed for ip in ip6s_all if isinstance(ip, ipaddress.IPv6Address) and (not ip.is_private) and (not ip.is_link_local)]
+
+    if DEBUG_MODE:
+        logging.debug(f"[DEBUG] Syncing {mode} records for {hostname} in zone {zone}")
+        logging.debug(f"[DEBUG]   IPv4: {ip4}")
+        logging.debug(f"[DEBUG]   IPv6 ULA: {ip6s_ula}")
+        logging.debug(f"[DEBUG]   IPv6 GUA: {ip6s_gua}")
 
     existing_records = get_existing_records(hostname, zone)
     existing_v4 = {ipaddress.ip_address(r["rData"]["ipAddress"]).compressed for r in existing_records if r["type"] == "A"}
@@ -743,6 +761,11 @@ def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, fo
         current_v6 = set(ip6s_ula + ip6s_gua)
     else:
         current_v6 = set(ip6s_ula)
+
+    if DEBUG_MODE:
+        logging.debug(f"[DEBUG]   Publishing IPv4: {bool(current_v4)}, IPv6: {bool(current_v6)}")
+        logging.debug(f"[DEBUG]   Existing A records: {existing_v4}")
+        logging.debug(f"[DEBUG]   Existing AAAA records: {existing_v6}")
 
     # Cleanup: if there are historical AAAA records for GUA under hostname.zone, remove them
     # (only for DHCP/SLAAC mode)
@@ -888,6 +911,7 @@ if __name__ == "__main__":
     logging.info("CLOCK: {} seconds".format(CLOCK))
     logging.info("REFRESH_CYCLE: {} cycles".format(REFRESH_CYCLE))
     logging.info("ENABLE_WIREGUARD_DNS: {}".format(ENABLE_WIREGUARD_DNS))
+    logging.info("DEBUG_MODE: {}".format(DEBUG_MODE))
     if ENABLE_WIREGUARD_DNS:
         logging.info("WG_INSTANCES_DNSZONES: {}".format(WG_INSTANCES_DNSZONES))
     run()

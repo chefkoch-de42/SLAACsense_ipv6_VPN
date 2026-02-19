@@ -32,8 +32,10 @@ You can optionally set the `DOCKER_IMAGE` environment variable to use a specific
 | `TECHNITIUM_USE_SOA_SERIAL_DATE_SCHEME`| (Optional) Enable SOA serial date scheme when auto-creating reverse zones                                     | `true` (defaults to true)                                              |
 | `TECHNITIUM_IPV6_PTR_PREFIXLEN`        | (Optional) IPv6 reverse zone prefix length to create (must be divisible by 4, e.g. 48/56/64). Default is /64 | `64` (defaults to 64)                                                  |
 | `TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG` | (Optional) Retry creating reverse zones without catalog if catalog permissions are missing               | `true` (defaults to true)                                              |
+| `TECHNITIUM_PTR_ONLY_OVERWRITE`        | (Optional) Overwrite PTR records if they point to a different target (only for IPv6 GUA)                    | `false` (defaults to false)                                            |
 | `ENABLE_WIREGUARD_DNS`                 | Enable WireGuard client DNS record synchronization                                                        | `false` (defaults to false)                                            |
 | `WG_INSTANCES_DNSZONES`                | Map WireGuard instance names to DNS zones (comma-separated)                                               | `wg1=vpn-wg1.example1.com,another=vpn2.example.com`                    |
+| `DEBUG_MODE`                           | (Optional) Enable detailed debug logging for DNS operations (add/delete/update, modes, cycles)             | `false` (defaults to false)                                            |
 
 ### DNS_ZONE_SUBNETS Format
 
@@ -84,6 +86,34 @@ To enable WireGuard support:
 3. Ensure the corresponding DNS zones exist in Technitium
 
 Example: A WireGuard client named `client-laptop` with tunnel address `10.99.99.201/32` on instance `wg1` will create DNS record `client-laptop.vpn-wg1.example1.com`.
+
+### Debug Mode
+When troubleshooting DNS synchronization issues, you can enable detailed debug logging:
+
+1. Set `DEBUG_MODE=true` in your environment variables
+2. Debug logs will show:
+   - Sync mode (DHCP/SLAAC or WireGuard) for each host
+   - IPv4 and IPv6 address details (ULA vs GUA separation)
+   - Existing vs new DNS records being synced
+   - Individual add/delete/update operations
+   - Refresh cycle progress and host counts
+   - Number of new/changed hosts being processed
+
+Example debug output:
+```
+[DEBUG] Cycle 12/1440 - Found 15 DHCP/SLAAC hosts
+[DEBUG] Found 5 WireGuard clients
+[DEBUG] Processing 2 new/changed DHCP/SLAAC hosts
+[DEBUG] Syncing DHCP/SLAAC records for laptop in zone home.example.com
+[DEBUG]   IPv4: 192.168.1.10
+[DEBUG]   IPv6 ULA: ['fd00::1']
+[DEBUG]   IPv6 GUA: []
+[DEBUG]   Publishing IPv4: True, IPv6: True
+[DEBUG]   Existing A records: set()
+[DEBUG]   Existing AAAA records: set()
+[DEBUG] Adding A record: laptop.home.example.com => 192.168.1.10
+[DEBUG] Adding AAAA record: laptop.home.example.com => fd00::1
+```
 
 ### Contributing:
 I welcome contributions! Feel free to submit issues, feature requests, or pull requests.
