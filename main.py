@@ -333,7 +333,10 @@ def ensure_reverse_zone_for_ip(ip_str: str) -> bool:
 def get_existing_records(domain, zone):
     ok, payload = technitium_request(
         "/api/zones/records/get",
-        params={"domain": f"{domain}.{zone}"},
+        params={
+            "domain": f"{domain}.{zone}",
+            "zone": zone
+        },
         action=f"Get records for {domain}.{zone}",
     )
     if not ok:
@@ -348,7 +351,7 @@ def delete_record(zone, domain, record_type, value):
             "domain": f"{domain}.{zone}",
             "zone": zone,
             "type": record_type,
-            "value": value,
+            "ipAddress": value,  # Use ipAddress instead of value for A/AAAA records
         },
         action=f"Delete {record_type} {domain}.{zone} => {value}",
     )
@@ -365,6 +368,7 @@ def add_record(zone, domain, record_type, ip):
         "/api/zones/records/add",
         params={
             "domain": f"{domain}.{zone}",
+            "zone": zone,
             "type": record_type,
             "ttl": 5,
             "expiryTtl": 604800,
@@ -426,11 +430,18 @@ def add_ptr_only(zone: str, domain: str, ip: str):
         logging.warning(f"Skipping PTR-only for invalid IP: {ip}")
         return
 
-    ptr_owner, _ptr_zone = reverse_record_owner_within_zone(ip_obj)
+    ptr_owner, ptr_zone = reverse_record_owner_within_zone(ip_obj)
     desired_ptr_name = f"{domain}.{zone}".lower().rstrip(".")
 
+    # Extract hostname part from FQDN (ptr_owner is FQDN like "1.2.3.ip6.arpa", ptr_zone is "ip6.arpa")
+    # We need just the label part before the zone
+    if ptr_owner.endswith(f".{ptr_zone}"):
+        ptr_label = ptr_owner[: -(len(ptr_zone) + 1)]  # Remove ".{ptr_zone}"
+    else:
+        ptr_label = ptr_owner  # Fallback if something went wrong
+
     # Dedup/overwrite protection: check if PTR already exists at ptr_owner
-    existing_owner_records = get_existing_records(ptr_owner, "")
+    existing_owner_records = get_existing_records(ptr_label, ptr_zone)
     existing_ptrs = [r for r in existing_owner_records if r.get("type") == "PTR"]
 
     for r in existing_ptrs:
@@ -443,18 +454,30 @@ def add_ptr_only(zone: str, domain: str, ip: str):
             return
 
         if TECHNITIUM_PTR_ONLY_OVERWRITE and current_ptr_name:
-            # Replace wrong target
-            delete_record("", ptr_owner, "PTR", current_ptr_name)
+            # Replace wrong target - need to use ptrName parameter for PTR delete
+            ok, _payload = technitium_request(
+                "/api/zones/records/delete",
+                params={
+                    "domain": ptr_owner,
+                    "zone": ptr_zone,
+                    "type": "PTR",
+                    "ptrName": current_ptr_name,
+                },
+                action=f"Delete PTR {ptr_owner} => {current_ptr_name}",
+            )
+            if ok:
+                logging.info(f"Deleted PTR record for {ptr_owner} -> {current_ptr_name}")
             break
 
     ok, _payload = technitium_request(
         "/api/zones/records/add",
         params={
             "domain": ptr_owner,
+            "zone": ptr_zone,
             "type": "PTR",
             "ttl": 5,
             "expiryTtl": 604800,
-            "overwrite": "false",
+            "overwrite": "true",  # Use overwrite=true to handle cases where record already exists
             "ptr": "false",
             "comments": "slaacsense",
             "ptrName": desired_ptr_name,
@@ -587,57 +610,33 @@ def process_wireguard_clients():
 
     return wg_matches
 
-def sync_wg_records(match):
-    """Sync DNS records for a WireGuard client.
+def sync_records(zones, match, zone_override=None, publish_gua_as_aaaa=False, force_ipv4=False):
+    """Sync DNS records for a host (DHCP/SLAAC or WireGuard).
 
-    match format: (ipv4, ipv6s_tuple, hostname, zone)
+    Args:
+        zones: List of (network, zone_name) tuples
+        match: Tuple of (ipv4, ipv6s_tuple, hostname[, zone]) - zone is optional for WireGuard
+        zone_override: Optional zone name (extracted from match[3] for WireGuard)
+        publish_gua_as_aaaa: If True, publish GUA addresses as AAAA (for WireGuard)
+        force_ipv4: If True, always publish IPv4 records regardless of DO_V4 setting (for WireGuard)
     """
-    ip4, ip6s, hostname, zone = match
+    # For WireGuard matches: (ip4, ip6s, hostname, zone)
+    # For DHCP matches: (ip4, ip6s, hostname)
+    if zone_override or (len(match) == 4 and isinstance(match[3], str)):
+        zone = zone_override or match[3]
+        ip4, ip6s_tuple, hostname = match[0], match[1], match[2]
+    else:
+        zone = find_zone(zones, ipaddress.ip_address(match[0]))
+        if zone is None:
+            logging.warning("Could not find a DNS zone for " + match[0])
+            return
+        ip4, ip6s_tuple, hostname = match[0], match[1], match[2]
 
     if not hostname:
-        logging.warning(f"No hostname for WireGuard client with IP {ip4}")
+        logging.warning(f"No hostname found for {ip4}")
         return
 
-    ip6s_all = [ipaddress.ip_address(x) for x in ip6s]
-
-    # For WireGuard, we typically want to publish both ULA and GUA
-    # (different from SLAAC where we only publish ULA as AAAA)
-    ip6s_filtered = [ip.compressed for ip in ip6s_all if not ip.is_link_local]
-
-    existing_records = get_existing_records(hostname, zone)
-    existing_v4 = {ipaddress.ip_address(r["rData"]["ipAddress"]).compressed for r in existing_records if r["type"] == "A"}
-    existing_v6 = {ipaddress.ip_address(r["rData"]["ipAddress"]).compressed for r in existing_records if r["type"] == "AAAA"}
-
-    current_v4 = {ipaddress.ip_address(ip4).compressed}
-    current_v6 = set(ip6s_filtered)
-
-    # Delete outdated records
-    for ip in existing_v4 - current_v4:
-        delete_record(zone, hostname, "A", ip)
-
-    for ip in existing_v6 - current_v6:
-        delete_record(zone, hostname, "AAAA", ip)
-
-    # Add missing records
-    for ip in current_v4 - existing_v4:
-        add_record(zone, hostname, "A", ip)
-
-    for ip in current_v6 - existing_v6:
-        add_record(zone, hostname, "AAAA", ip)
-
-def sync_records(zones, match):
-    zone = find_zone(zones, ipaddress.ip_address(match[0]))
-    if zone is None:
-        logging.warning("Could not find a DNS zone for " + match[0])
-        return
-
-    ip4 = match[0]
-    ip6s_all = [ipaddress.ip_address(x) for x in match[1]]
-    hostname = match[2]
-
-    if hostname == "":
-        logging.warning("No hostname found for " + match[0])
-        return
+    ip6s_all = [ipaddress.ip_address(x) for x in ip6s_tuple]
 
     # Separate IPv6 by scope/type
     ip6s_ula = [ip.compressed for ip in ip6s_all if isinstance(ip, ipaddress.IPv6Address) and ip.is_private and not ip.is_link_local]
@@ -647,13 +646,22 @@ def sync_records(zones, match):
     existing_v4 = {ipaddress.ip_address(r["rData"]["ipAddress"]).compressed for r in existing_records if r["type"] == "A"}
     existing_v6 = {ipaddress.ip_address(r["rData"]["ipAddress"]).compressed for r in existing_records if r["type"] == "AAAA"}
 
-    current_v4 = set([ipaddress.ip_address(ip4).compressed] if DO_V4 else [])
-    # Only publish AAAA for ULA (not for GUA)
-    current_v6 = set(ip6s_ula)
+    # For WireGuard (force_ipv4=True): always publish IPv4
+    # For DHCP/SLAAC: only publish IPv4 if DO_V4 is enabled
+    current_v4 = set([ipaddress.ip_address(ip4).compressed] if (force_ipv4 or DO_V4) else [])
+
+    # For WireGuard: publish both ULA and GUA as AAAA
+    # For DHCP/SLAAC: only publish ULA as AAAA
+    if publish_gua_as_aaaa:
+        current_v6 = set(ip6s_ula + ip6s_gua)
+    else:
+        current_v6 = set(ip6s_ula)
 
     # Cleanup: if there are historical AAAA records for GUA under hostname.zone, remove them
-    for ip in (existing_v6 & set(ip6s_gua)):
-        delete_record(zone, hostname, "AAAA", ip)
+    # (only for DHCP/SLAAC mode)
+    if not publish_gua_as_aaaa:
+        for ip in (existing_v6 & set(ip6s_gua)):
+            delete_record(zone, hostname, "AAAA", ip)
 
     # Delete outdated records (A/AAAA only)
     for ip in existing_v4 - current_v4:
@@ -672,9 +680,10 @@ def sync_records(zones, match):
     # Ensure PTRs exist for all relevant IPs:
     # - IPv4: PTR is handled by add_record(A, ptr=true) when DO_V4 is enabled.
     # - IPv6 ULA: PTR is handled by add_record(AAAA, ptr=true).
-    # - IPv6 GUA: PTR only (no AAAA!)
-    for ip in ip6s_gua:
-        add_ptr_only(zone, hostname, ip)
+    # - IPv6 GUA: PTR only (no AAAA!) - only for DHCP/SLAAC mode
+    if not publish_gua_as_aaaa:
+        for ip in ip6s_gua:
+            add_ptr_only(zone, hostname, ip)
 
 def run():
     if not VERIFY_HTTPS:
@@ -712,7 +721,7 @@ def run():
             wg_matches = process_wireguard_clients()
             new_wg_matches = wg_matches - previous_wg_matches
             for match in new_wg_matches:
-                sync_wg_records(match)
+                sync_records(zones, match, publish_gua_as_aaaa=True, force_ipv4=True)
             previous_wg_matches = wg_matches
 
         # Every REFRESH_CYCLE iterations, refresh all records to prevent expiration
@@ -723,7 +732,7 @@ def run():
                 sync_records(zones, match)
             if ENABLE_WIREGUARD_DNS:
                 for match in previous_wg_matches:
-                    sync_wg_records(match)
+                    sync_records(zones, match, publish_gua_as_aaaa=True, force_ipv4=True)
             refresh_counter = 0
 
         previous_matches = matches
