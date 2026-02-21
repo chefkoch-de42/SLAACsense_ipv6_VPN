@@ -34,6 +34,7 @@ You can optionally set the `DOCKER_IMAGE` environment variable to use a specific
 | `TECHNITIUM_ZONE_CREATE_FALLBACK_NO_CATALOG` | (Optional) Retry creating reverse zones without catalog if catalog permissions are missing               | `true` (defaults to true)                                              |
 | `TECHNITIUM_PTR_ONLY_OVERWRITE`        | (Optional) Overwrite PTR records if they point to a different target                                        | `false` (defaults to false)                                            |
 | `TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY`  | (Optional) Create PTR-only records for IPv6 GUA addresses from NDP table, even if not in DNS_ZONE_SUBNETS  | `false` (defaults to false)                                            |
+| `TECHNITIUM_IPV6_LLA_CREATE_PTR_ONLY`  | (Optional) Create PTR-only records for IPv6 Link-Local addresses from NDP table. Only effective when `IGNORE_LINK_LOCAL=false`, or when enabled alongside it (LLA are then collected separately for PTR-only and not published as AAAA) | `false` (defaults to false) |
 | `ENABLE_WIREGUARD_DNS`                 | Enable WireGuard client DNS record synchronization                                                        | `false` (defaults to false)                                            |
 | `WG_INSTANCES_DNSZONES`                | Map WireGuard instance names to DNS zones (comma-separated)                                               | `wg1=vpn-wg1.example1.com,another=vpn2.example.com`                    |
 | `LOG_LEVEL`                            | (Optional) Logging level: DEBUG, INFO, WARNING, ERROR                                                      | `INFO` (defaults to INFO)                                              |
@@ -80,6 +81,17 @@ By default, SLAACsense only creates DNS records for IPv6 addresses that fall wit
 Set `TECHNITIUM_IPV6_GUA_CREATE_PTR_ONLY=true` to additionally create **PTR-only reverse records** for all GUA addresses found in the NDP table for a known host — without publishing a forward AAAA record. The required reverse zone (`ip6.arpa`) is auto-created if missing, using the same mechanism as other reverse zones.
 
 > **Note:** This setting is independent of `DNS_ZONE_SUBNETS`. GUA addresses are collected directly from the NDP table and do not need to match any configured subnet.
+
+### IPv6 Link-Local PTR Records
+By default, link-local addresses (`fe80::/10`) are excluded from all processing via `IGNORE_LINK_LOCAL=true`.
+
+Set `TECHNITIUM_IPV6_LLA_CREATE_PTR_ONLY=true` to create **PTR-only reverse records** for link-local addresses found in the NDP table — without publishing a forward AAAA record.
+
+**Interaction with `IGNORE_LINK_LOCAL`:**
+- `IGNORE_LINK_LOCAL=true` (default) + `TECHNITIUM_IPV6_LLA_CREATE_PTR_ONLY=true`: LLA addresses are **excluded from AAAA records** but still collected for PTR-only creation. This is the recommended combination.
+- `IGNORE_LINK_LOCAL=false` + `TECHNITIUM_IPV6_LLA_CREATE_PTR_ONLY=true`: LLA addresses appear both as AAAA records (if in a configured subnet) and get PTR-only records.
+- `IGNORE_LINK_LOCAL=false` + `TECHNITIUM_IPV6_LLA_CREATE_PTR_ONLY=false`: Original behavior — LLA are treated like any other IPv6 address (included/excluded based on `DNS_ZONE_SUBNETS`).
+- `IGNORE_LINK_LOCAL=true` + `TECHNITIUM_IPV6_LLA_CREATE_PTR_ONLY=false` (default): LLA addresses are fully ignored.
 
 ### WireGuard Support
 SLAACsense can also synchronize DNS records for WireGuard VPN clients configured in OPNsense. When enabled, it will:
